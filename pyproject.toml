@@ -1,0 +1,21 @@
+[project]
+name = "meridian"
+version = "0.1.0"
+description = "Meridian Breakdown-to-Resolution System"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain",
+    "langgraph",
+    "langchain-community",
+    "pandas",
+    "openpyxl",
+    "pydantic",
+    "pytest",
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
