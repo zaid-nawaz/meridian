@@ -216,3 +216,15 @@ ON maintenance_events(normalized_vehicle_reg);
 
 CREATE INDEX IF NOT EXISTS idx_aliases_lookup
 ON entity_aliases(entity_type, normalized_alias);
+
+CREATE TABLE IF NOT EXISTS pipeline_state (
+    ticket_id TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    work_order_id TEXT,
+    notification_id TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_state_hash
+ON pipeline_state(content_hash);

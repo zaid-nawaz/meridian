@@ -1,0 +1,68 @@
+[
+  {
+    "rule_id": "BS4_VEHICLE_RESTRICTION_DELHI",
+    "condition": "October to February",
+    "action": "No BS4 vehicle goes on any Delhi NCR route.",
+    "source_quote": "October to February, no BS4 vehicle goes on any Delhi NCR route."
+  },
+  {
+    "rule_id": "HILL_ROUTE_VEHICLE_REQUIREMENTS",
+    "condition": "November to February",
+    "action": "Vehicle must have an engine heater and no brake work in the last thirty days.",
+    "source_quote": "The vehicle must have an engine heater... I never send a vehicle on a hill route if it has had any brake work in the last thirty days."
+  },
+  {
+    "rule_id": "SHAKTI_CEMENT_DELIVERY_WINDOW",
+    "condition": "Shakti load crosses 36 hours",
+    "action": "Plan everything to 36 hours.",
+    "source_quote": "If a Shakti load crosses 36 hours... in my head Shakti is a 36 hour client."
+  },
+  {
+    "rule_id": "VERTEX_RETAIL_DELIVERY_TIME",
+    "condition": "Vertex truck is going to reach after 6 pm",
+    "action": "Hold it at the last halt, deliver next morning at 8.",
+    "source_quote": "If a Vertex truck is going to reach after 6, don't let it reach after 6."
+  },
+  {
+    "rule_id": "APEX_CHEMICALS_TRUCK_ROTATION",
+    "condition": "Truck has any issue on an Apex run",
+    "action": "Send a different vehicle at least once in between.",
+    "source_quote": "If a truck has any issue on an Apex run... send a different vehicle at least once in between."
+  },
+  {
+    "rule_id": "ORION_PHARMA_VEHICLE_REQUIREMENTS",
+    "condition": "Orion Pharma loads",
+    "action": "Never wait at a hub overnight unrefrigerated and always use the newest available vehicle, 2020 or later.",
+    "source_quote": "Their loads never wait at a hub overnight unrefrigerated, and their consignments always get the newest available vehicle, 2020 or later."
+  },
+  {
+    "rule_id": "MONSOON_TIME_ADJUSTMENT",
+    "condition": "July to September, anything going east of Lucknow",
+    "action": "Add twenty percent to whatever time the computer says.",
+    "source_quote": "July to September, anything going east of Lucknow, add twenty percent to whatever time the computer says."
+  },
+  {
+    "rule_id": "BREAKDOWN_REPLACEMENT_VEHICLE",
+    "condition": "Vehicle breaks down within 50 kilometers of its origin hub",
+    "action": "Replacement comes from the origin hub.",
+    "source_quote": "If a vehicle breaks down within 50 kilometers of its origin hub, the replacement comes from the origin hub."
+  },
+  {
+    "rule_id": "OVERDUE_SERVICE_VEHICLE_GROUNDING",
+    "condition": "Vehicle is more than 30 days past its due service date",
+    "action": "Grounded, does not move.",
+    "source_quote": "Any vehicle that is more than 30 days past its due service date is grounded."
+  },
+  {
+    "rule_id": "GUDDU_JUGAAD_REPAIR_TIME",
+    "condition": "Temporary fix by Guddu",
+    "action": "Must get a permanent repair within seven days.",
+    "source_quote": "Whatever he patched must get a permanent repair within seven days."
+  },
+  {
+    "rule_id": "NEW_DRIVER_NIGHT_RUNS",
+    "condition": "New drivers, less than six months with us",
+    "action": "Never go solo on a night run.",
+    "source_quote": "New drivers, less than six months with us, never go solo on a night run."
+  }
+]

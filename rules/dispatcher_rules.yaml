@@ -1,0 +1,144 @@
+rules:
+
+  - rule_id: BS4_DELHI_NCR_SEASONAL
+    type: vehicle_eligibility
+    condition:
+      vehicle.bs_stage: BS4
+      destination_region: Delhi_NCR
+      months:
+        - 10
+        - 11
+        - 12
+        - 1
+        - 2
+    action:
+      eligible: false
+    description: >
+      BS4 vehicles are excluded from Delhi/NCR routes
+      October through February.
+
+  - rule_id: HILL_ROUTE_WINTER
+    type: vehicle_eligibility
+    condition:
+      hill_route: true
+      months:
+        - 11
+        - 12
+        - 1
+        - 2
+    action:
+      require:
+        - engine_heater
+        - no_brake_work_last_30_days
+    description: >
+      Hill routes toward Rudrapur and beyond toward Nainital
+      November through February require an engine heater and
+      no brake work in the last 30 days.
+
+  - rule_id: SHAKTI_INTERNAL_SLA
+    type: client_sla
+    condition:
+      client: SHAKTI_CEMENT
+    action:
+      sla_hours: 36
+    description: >
+      Shakti Cement internal SLA is 36 hours rather than
+      the contracted 48 hours.
+
+  - rule_id: VERTEX_AFTER_6PM
+    type: delivery
+    condition:
+      client: VERTEX_RETAIL
+      warehouse: LUDHIANA
+      delivery_after: "18:00"
+    action:
+      reschedule_time: "08:00"
+      reschedule_next_day: true
+      mark_failed: false
+    description: >
+      Vertex Retail deliveries after 6pm at the Ludhiana
+      warehouse are rescheduled to next-morning 8am and
+      are never marked failed.
+
+  - rule_id: APEX_VEHICLE_ROTATION
+    type: vehicle_eligibility
+    condition:
+      client: APEX_CHEMICALS
+      previous_dispatch_had_issue: true
+    action:
+      exclude_from_next_dispatch: true
+    description: >
+      A truck involved in any issue on an Apex run is excluded
+      from the very next Apex dispatch.
+
+  - rule_id: ORION_MIN_MODEL_YEAR
+    type: vehicle_eligibility
+    condition:
+      client: ORION_PHARMA
+    action:
+      minimum_model_year: 2020
+    description: >
+      Orion Pharma only accepts vehicles from model year
+      2020 or later.
+
+  - rule_id: MONSOON_EAST_LUCKNOW
+    type: eta
+    condition:
+      months:
+        - 7
+        - 8
+        - 9
+      route_east_of_lucknow: true
+    action:
+      eta_multiplier: 1.20
+    description: >
+      During monsoon, July through September, routes east
+      of Lucknow receive a 20 percent ETA increase.
+
+  - rule_id: ORIGIN_HUB_REPLACEMENT
+    type: breakdown
+    condition:
+      breakdown_distance_from_origin_km:
+        maximum: 50
+    action:
+      replacement_source: origin_hub
+    description: >
+      A breakdown within 50km of the origin hub always
+      requires the origin hub to send the replacement.
+
+  - rule_id: SERVICE_OVERDUE_30_DAYS
+    type: vehicle_eligibility
+    condition:
+      service_overdue_days:
+        greater_than: 30
+    action:
+      eligible: false
+      grounded: true
+    description: >
+      Any vehicle more than 30 days overdue on service is
+      grounded with no exceptions.
+
+  - rule_id: GUDDU_JUGAAD
+    type: maintenance
+    condition:
+      maintenance_contains:
+        - jugaad
+        - permanent_fix_pending
+    action:
+      restriction_days: 7
+      restrict_to_home_region: true
+    description: >
+      Guddu's jugaad patches create a 7-day clock and keep
+      the vehicle in its home region until permanent repair.
+
+  - rule_id: NEW_DRIVER_NIGHT_RUN
+    type: driver_eligibility
+    condition:
+      driver_tenure_months:
+        less_than: 6
+      solo_night_run: true
+    action:
+      eligible: false
+    description: >
+      Drivers with less than 6 months tenure cannot perform
+      solo night runs.
