@@ -29,3 +29,27 @@ audit/*
 # IDE
 .vscode/
 .idea/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local database
+db/*.db
+db/*.sqlite
+db/*.sqlite3
+
+# Generated processed corpus
+data/processed/
+
+# Generated outputs
+outputs/*
+audit/*
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/

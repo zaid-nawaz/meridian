@@ -37,14 +37,29 @@ def test_empty_plate():
 
 
 def test_client_normalization():
-    assert normalize_client_name("Shakti Cement") == "SHAKTI CEMENT"
+    assert (
+        normalize_client_name("Shakti Cement")
+        == "SHAKTI CEMENT"
+    )
 
-    assert normalize_client_name("  Shakti Cement  ") == "SHAKTI CEMENT"
+    assert (
+        normalize_client_name("  Shakti Cement  ")
+        == "SHAKTI CEMENT"
+    )
 
-    assert normalize_client_name("SHAKTI CEMENT") == "SHAKTI CEMENT"
+    assert (
+        normalize_client_name("SHAKTI CEMENT")
+        == "SHAKTI CEMENT"
+    )
 
 
 def test_client_punctuation():
-    assert normalize_client_name("Shakti Cement.") == "SHAKTI CEMENT"
+    assert (
+        normalize_client_name("Shakti Cement.")
+        == "SHAKTI CEMENT"
+    )
 
-    assert normalize_client_name("Shakti, Cement") == "SHAKTI CEMENT"
+    assert (
+        normalize_client_name("Shakti, Cement")
+        == "SHAKTI CEMENT"
+    )
