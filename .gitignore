@@ -53,3 +53,5 @@ audit/*
 # IDE
 .vscode/
 .idea/
+
+db/chroma/
