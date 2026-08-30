@@ -1,32 +1,44 @@
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from src.ingest.database import get_connection
 from src.ingest.entity_resolution import normalize_plate
+
 from src.pipeline.ledger import (
     get_pipeline_state,
     upsert_pipeline_state,
 )
+
 from src.pipeline.state import PipelineState
+
 from src.pipeline.utils import (
     AUDIT_DIR,
     OUTPUT_DIR,
     append_jsonl,
     content_hash,
     new_id,
+    read_jsonl,
     utc_now,
 )
+
 from src.rules_engine.engine import evaluate
 
+
+# ============================================================
+# CONFIG
+# ============================================================
 
 REQUIRED_TICKET_FIELDS = {
     "ticket_id",
 }
 
+
+# ============================================================
+# GENERAL HELPERS
+# ============================================================
 
 def _audit(
     state: PipelineState,
@@ -53,6 +65,99 @@ def _audit(
     )
 
 
+def _safe_date(value: Any) -> date | None:
+    """
+    Convert common date representations into date objects.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    formats = (
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    )
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(
+                text,
+                fmt,
+            ).date()
+        except ValueError:
+            continue
+
+    return None
+
+
+def _ticket_vehicle_reg(
+    ticket: dict,
+) -> str | None:
+
+    value = (
+        ticket.get("vehicle")
+        or ticket.get("vehicle_reg")
+        or ticket.get("vehicle_registration")
+        or ticket.get("registration_number")
+    )
+
+    if value is None:
+        return None
+
+    return str(value).strip()
+
+
+def _ticket_client(
+    ticket: dict,
+) -> str:
+
+    return str(
+        ticket.get("client")
+        or ""
+    ).strip()
+
+
+def _append_unique_jsonl(
+    path,
+    record: dict,
+    unique_key: str,
+) -> bool:
+    """
+    Append a record only if its unique key does not
+    already exist in the JSONL file.
+
+    Returns True if appended.
+    """
+
+    existing = read_jsonl(path)
+
+    value = record.get(unique_key)
+
+    for item in existing:
+        if item.get(unique_key) == value:
+            return False
+
+    append_jsonl(
+        path,
+        record,
+    )
+
+    return True
+
+
 # ============================================================
 # VALIDATE
 # ============================================================
@@ -69,12 +174,20 @@ def validate_node(
 
     state["current_node"] = "validate"
 
+    # ---------------------------------------------------------
+    # Missing ticket ID
+    # ---------------------------------------------------------
+
     if not ticket_id:
 
         state["status"] = "quarantine"
 
         state["quarantine_reason"] = (
             "missing ticket_id"
+        )
+
+        state["content_hash"] = content_hash(
+            ticket
         )
 
         _audit(
@@ -89,6 +202,10 @@ def validate_node(
 
         return state
 
+    # ---------------------------------------------------------
+    # Establish ticket identity
+    # ---------------------------------------------------------
+
     state["ticket_id"] = str(
         ticket_id
     )
@@ -100,6 +217,10 @@ def validate_node(
     state["content_hash"] = (
         ticket_hash
     )
+
+    # ---------------------------------------------------------
+    # Required fields
+    # ---------------------------------------------------------
 
     missing = [
         field
@@ -116,12 +237,6 @@ def validate_node(
             + ", ".join(missing)
         )
 
-        upsert_pipeline_state(
-            ticket_id=state["ticket_id"],
-            content_hash=ticket_hash,
-            status="quarantine",
-        )
-
         _audit(
             state,
             "validate_node",
@@ -134,35 +249,50 @@ def validate_node(
 
         return state
 
+    # ---------------------------------------------------------
+    # Idempotency / duplicate detection
+    #
+    # Same ticket_id is treated as the same logical ticket.
+    # The first occurrence is canonical.
+    # ---------------------------------------------------------
+
     existing = get_pipeline_state(
         state["ticket_id"]
     )
 
     if existing:
 
-        if existing["content_hash"] == ticket_hash:
+        state["status"] = "duplicate"
 
-            state["status"] = "duplicate"
+        state["work_order_id"] = (
+            existing["work_order_id"]
+        )
 
-            state["work_order_id"] = (
-                existing["work_order_id"]
-            )
+        state["notification_id"] = (
+            existing["notification_id"]
+        )
 
-            state["notification_id"] = (
-                existing["notification_id"]
-            )
+        _audit(
+            state,
+            "validate_node",
+            "duplicate",
+            {
+                "existing_status":
+                    existing["status"],
 
-            _audit(
-                state,
-                "validate_node",
-                "duplicate",
-                {
-                    "existing_status":
-                        existing["status"]
-                },
-            )
+                "existing_work_order_id":
+                    existing["work_order_id"],
 
-            return state
+                "existing_notification_id":
+                    existing["notification_id"],
+            },
+        )
+
+        return state
+
+    # ---------------------------------------------------------
+    # New valid ticket
+    # ---------------------------------------------------------
 
     state["status"] = "valid"
 
@@ -198,20 +328,26 @@ def enrich_node(
     trip = None
     maintenance = []
 
-    vehicle_raw = (
-        ticket.get("vehicle")
-        or ticket.get("vehicle_reg")
-        or ticket.get("vehicle_registration")
+    vehicle_raw = _ticket_vehicle_reg(
+        ticket
     )
 
     driver_id = ticket.get(
         "driver_id"
     )
 
+    trip_id = ticket.get(
+        "trip_id"
+    )
+
+    # ---------------------------------------------------------
+    # Vehicle + maintenance
+    # ---------------------------------------------------------
+
     if vehicle_raw:
 
         normalized = normalize_plate(
-            str(vehicle_raw)
+            vehicle_raw
         )
 
         with get_connection() as db:
@@ -240,9 +376,13 @@ def enrich_node(
             ).fetchall()
 
             maintenance = [
-                dict(r)
-                for r in rows
+                dict(row)
+                for row in rows
             ]
+
+    # ---------------------------------------------------------
+    # Driver
+    # ---------------------------------------------------------
 
     if driver_id:
 
@@ -260,9 +400,9 @@ def enrich_node(
             if row:
                 driver = dict(row)
 
-    trip_id = ticket.get(
-        "trip_id"
-    )
+    # ---------------------------------------------------------
+    # Trip
+    # ---------------------------------------------------------
 
     if trip_id:
 
@@ -280,12 +420,23 @@ def enrich_node(
             if row:
                 trip = dict(row)
 
+    # ---------------------------------------------------------
+    # Store enrichment
+    # ---------------------------------------------------------
+
     state["vehicle"] = vehicle
     state["driver"] = driver
     state["trip"] = trip
     state["maintenance"] = maintenance
 
-    if vehicle is None and vehicle_raw:
+    # ---------------------------------------------------------
+    # Explicit vehicle supplied but unresolved
+    # ---------------------------------------------------------
+
+    if (
+        vehicle is None
+        and vehicle_raw
+    ):
 
         state["status"] = "quarantine"
 
@@ -293,21 +444,32 @@ def enrich_node(
             f"vehicle not found: {vehicle_raw}"
         )
 
+        _audit(
+            state,
+            "enrich_node",
+            "vehicle_not_found",
+            {
+                "vehicle":
+                    vehicle_raw
+            },
+        )
+
+        return state
+
     _audit(
         state,
         "enrich_node",
-        (
-            "enriched"
-            if vehicle is not None
-            else "vehicle_not_found"
-        ),
+        "enriched",
         {
             "vehicle_found":
                 vehicle is not None,
+
             "driver_found":
                 driver is not None,
+
             "trip_found":
                 trip is not None,
+
             "maintenance_count":
                 len(maintenance),
         },
@@ -317,7 +479,7 @@ def enrich_node(
 
 
 # ============================================================
-# CLASSIFY
+# CLASSIFICATION
 # ============================================================
 
 def _get_llm():
@@ -335,46 +497,82 @@ def classify_node(
 
     ticket = state["ticket"]
 
-    rules_facts = {
+    facts = {
         "vehicle":
             state.get("vehicle"),
+
         "driver":
             state.get("driver"),
+
+        "trip":
+            state.get("trip"),
+
         "maintenance":
-            state.get("maintenance", []),
+            state.get(
+                "maintenance",
+                [],
+            ),
     }
+
+    ticket_severity = (
+        ticket.get("severity")
+    )
 
     prompt = f"""
 You are the Meridian dispatch classifier.
 
-Classify the operational severity of this ticket.
+Classify this operational ticket.
 
-Return ONLY JSON:
+Return ONLY valid JSON:
 
 {{
   "severity": "LOW|MEDIUM|HIGH|CRITICAL",
   "category": "BREAKDOWN|DELAY|MAINTENANCE|OTHER",
-  "reason": "short explanation"
+  "reason": "short factual explanation"
 }}
 
-Use the ticket and structured operational facts.
+Rules:
 
-Do not invent facts.
+1. Use only the ticket and structured facts.
+2. Do not invent facts.
+3. Do not make operational decisions that belong
+   to the deterministic rules engine.
+4. Keep the reason concise.
+5. If the ticket already contains a severity,
+   preserve that severity exactly.
+
+Ticket-provided severity:
+
+{ticket_severity}
 
 Ticket:
-{json.dumps(ticket, default=str)}
 
-Structured facts:
-{json.dumps(rules_facts, default=str)}
+{json.dumps(
+    ticket,
+    ensure_ascii=False,
+    default=str,
+)}
+
+Structured operational facts:
+
+{json.dumps(
+    facts,
+    ensure_ascii=False,
+    default=str,
+)}
 """
 
-    state["classification_prompt"] = prompt
+    state["classification_prompt"] = (
+        prompt
+    )
 
     try:
 
         llm = _get_llm()
 
-        call_id = new_id("llm")
+        call_id = new_id(
+            "llm"
+        )
 
         response = llm.invoke(
             prompt
@@ -382,7 +580,10 @@ Structured facts:
 
         content = (
             response.content
-            if hasattr(response, "content")
+            if hasattr(
+                response,
+                "content",
+            )
             else str(response)
         )
 
@@ -390,19 +591,91 @@ Structured facts:
             content
         )
 
-        state["llm_call_id"] = call_id
+        state["llm_call_id"] = (
+            call_id
+        )
 
         try:
+
             classification = json.loads(
                 content
             )
+
         except json.JSONDecodeError:
 
             classification = {
-                "severity": "MEDIUM",
+                "severity": (
+                    str(
+                        ticket_severity
+                        or "MEDIUM"
+                    ).upper()
+                ),
                 "category": "OTHER",
-                "reason": content[:500],
+                "reason": (
+                    "LLM returned non-JSON "
+                    "classification."
+                ),
             }
+
+        # -----------------------------------------------------
+        # Preserve ticket severity when present.
+        # -----------------------------------------------------
+
+        if ticket_severity:
+
+            severity = str(
+                ticket_severity
+            ).upper()
+
+        else:
+
+            severity = str(
+                classification.get(
+                    "severity",
+                    "MEDIUM",
+                )
+            ).upper()
+
+        category = str(
+            classification.get(
+                "category",
+                "OTHER",
+            )
+        ).upper()
+
+        if severity not in {
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "CRITICAL",
+        }:
+
+            severity = "MEDIUM"
+
+        if category not in {
+            "BREAKDOWN",
+            "DELAY",
+            "MAINTENANCE",
+            "OTHER",
+        }:
+
+            category = "OTHER"
+
+        classification = {
+            "severity":
+                severity,
+
+            "category":
+                category,
+
+            "reason":
+                str(
+                    classification.get(
+                        "reason",
+                        "",
+                    )
+                )[:500],
+        }
 
         state["classification"] = (
             classification
@@ -421,14 +694,32 @@ Structured facts:
 
     except Exception as exc:
 
-        # Safe deterministic fallback.
+        fallback_severity = str(
+            ticket_severity
+            or "MEDIUM"
+        ).upper()
+
+        if fallback_severity not in {
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "CRITICAL",
+        }:
+
+            fallback_severity = "MEDIUM"
+
         classification = {
-            "severity": "MEDIUM",
-            "category": "BREAKDOWN",
-            "reason": (
-                "LLM classification unavailable; "
-                "defaulted to MEDIUM."
-            ),
+            "severity":
+                fallback_severity,
+
+            "category":
+                "BREAKDOWN",
+
+            "reason":
+                (
+                    "LLM classification unavailable; "
+                    "safe fallback used."
+                ),
         }
 
         state["classification"] = (
@@ -464,6 +755,9 @@ def select_vehicle_node(
     origin_hub = (
         ticket.get("origin_hub")
         or ticket.get("home_hub")
+        or (
+            state.get("vehicle") or {}
+        ).get("home_hub")
     )
 
     destination = (
@@ -472,36 +766,41 @@ def select_vehicle_node(
         or ""
     )
 
-    client = (
-        ticket.get("client")
-        or ""
-    )
-
-    breakdown_distance = float(
-        ticket.get(
-            "distance_from_origin_km",
-            999999,
-        )
+    client = _ticket_client(
+        ticket
     )
 
     # ---------------------------------------------------------
-    # Origin hub override
+    # IMPORTANT:
+    # tickets.json uses `km_from_origin_hub`.
     # ---------------------------------------------------------
 
-    if breakdown_distance <= 50:
+    raw_distance = ticket.get(
+        "km_from_origin_hub"
+    )
 
-        origin_hub_replacement = (
-            state.get("origin_hub")
-            or origin_hub
+    try:
+
+        breakdown_distance = float(
+            raw_distance
+            if raw_distance is not None
+            else 999999
         )
 
-        candidate_hub = (
-            origin_hub_replacement
-        )
+    except (
+        TypeError,
+        ValueError,
+    ):
 
-    else:
+        breakdown_distance = 999999
 
-        candidate_hub = origin_hub
+    # ---------------------------------------------------------
+    # Origin hub is the candidate source.
+    # The rules engine independently records the
+    # <=50km replacement rule.
+    # ---------------------------------------------------------
+
+    candidate_hub = origin_hub
 
     # ---------------------------------------------------------
     # Candidate vehicles
@@ -517,6 +816,7 @@ def select_vehicle_node(
                 FROM vehicles
                 WHERE home_hub = ?
                   AND status = 'Active'
+                ORDER BY vehicle_id
                 """,
                 (candidate_hub,),
             ).fetchall()
@@ -528,6 +828,7 @@ def select_vehicle_node(
                 SELECT *
                 FROM vehicles
                 WHERE status = 'Active'
+                ORDER BY vehicle_id
                 """
             ).fetchall()
 
@@ -540,51 +841,72 @@ def select_vehicle_node(
         candidates
     )
 
-    eligible = []
-    checked_rules = []
+    # ---------------------------------------------------------
+    # Ticket date
+    # ---------------------------------------------------------
 
-    ticket_date = ticket.get(
-        "date"
+    ticket_date = (
+        _safe_date(
+            ticket.get("date")
+        )
+        or _safe_date(
+            ticket.get("created_at")
+        )
+        or date.today()
     )
 
-    if not ticket_date:
-
-        ticket_date = datetime.now().date()
+    # ---------------------------------------------------------
+    # Context for deterministic rules
+    # ---------------------------------------------------------
 
     trip_context = {
-        "client": client,
-        "destination": destination,
+
+        "client":
+            client,
+
+        "destination":
+            destination,
+
         "destination_region":
             ticket.get(
                 "destination_region",
                 destination,
             ),
-        "origin_hub": origin_hub,
+
+        "origin_hub":
+            origin_hub,
+
         "breakdown_distance_from_origin_km":
             breakdown_distance,
+
         "hill_route":
             ticket.get(
                 "hill_route",
                 False,
             ),
+
         "night_run":
             ticket.get(
                 "night_run",
                 False,
             ),
+
         "solo":
             ticket.get(
                 "solo",
                 True,
             ),
+
         "service_due_date":
             ticket.get(
                 "service_due_date"
             ),
+
         "last_brake_work_date":
             ticket.get(
                 "last_brake_work_date"
             ),
+
         "route_east_of_lucknow":
             ticket.get(
                 "route_east_of_lucknow",
@@ -592,9 +914,16 @@ def select_vehicle_node(
             ),
     }
 
+    # ---------------------------------------------------------
+    # Evaluate candidates
+    # ---------------------------------------------------------
+
+    eligible = []
+    checked_rules = []
+
     for candidate in candidates:
 
-        is_eligible, rules = evaluate(
+        eligible_flag, rules = evaluate(
             vehicle=candidate,
             trip_context=trip_context,
             driver=state.get("driver"),
@@ -605,15 +934,16 @@ def select_vehicle_node(
             rules
         )
 
-        if is_eligible:
+        if eligible_flag:
+
             eligible.append(
                 candidate
             )
 
-    # Deduplicate rule IDs.
-
     checked_rules = list(
-        dict.fromkeys(checked_rules)
+        dict.fromkeys(
+            checked_rules
+        )
     )
 
     state["eligible_vehicles"] = (
@@ -623,6 +953,10 @@ def select_vehicle_node(
     state["checked_rule_ids"] = (
         checked_rules
     )
+
+    # ---------------------------------------------------------
+    # No eligible vehicle
+    # ---------------------------------------------------------
 
     if not eligible:
 
@@ -639,6 +973,10 @@ def select_vehicle_node(
             {
                 "candidate_count":
                     len(candidates),
+
+                "eligible_count":
+                    0,
+
                 "checked_rule_ids":
                     checked_rules,
             },
@@ -647,7 +985,10 @@ def select_vehicle_node(
 
         return state
 
-    # Prefer the first eligible vehicle.
+    # ---------------------------------------------------------
+    # Deterministic selection
+    # ---------------------------------------------------------
+
     selected = eligible[0]
 
     state["selected_vehicle"] = (
@@ -660,11 +1001,20 @@ def select_vehicle_node(
         "vehicle_selected",
         {
             "vehicle_id":
-                selected.get("vehicle_id"),
-            "registration_number":
+                selected.get(
+                    "vehicle_id"
+                ),
+
+            "vehicle_reg":
                 selected.get(
                     "registration_number"
                 ),
+
+            "candidate_count":
+                len(candidates),
+
+            "eligible_count":
+                len(eligible),
         },
         rule_ids=checked_rules,
     )
@@ -684,7 +1034,13 @@ def work_order_node(
         "work_order"
     )
 
-    ticket_id = state["ticket_id"]
+    ticket_id = state[
+        "ticket_id"
+    ]
+
+    # ---------------------------------------------------------
+    # Idempotency
+    # ---------------------------------------------------------
 
     existing = get_pipeline_state(
         ticket_id
@@ -705,63 +1061,75 @@ def work_order_node(
             "existing_work_order_reused",
             {
                 "work_order_id":
-                    existing["work_order_id"]
+                    existing[
+                        "work_order_id"
+                    ]
             },
         )
 
         return state
+
+    # ---------------------------------------------------------
+    # Create standardized work order
+    # ---------------------------------------------------------
 
     work_order_id = new_id(
         "WO"
     )
 
     selected = (
-        state.get("selected_vehicle")
-        or {}
-    )
-
-    classification = (
-        state.get("classification")
+        state.get(
+            "selected_vehicle"
+        )
         or {}
     )
 
     work_order = {
+
         "work_order_id":
             work_order_id,
+
         "ticket_id":
             ticket_id,
-        "created_at":
-            utc_now(),
-        "vehicle_id":
-            selected.get(
-                "vehicle_id"
-            ),
-        "vehicle_registration":
+
+        "vehicle_reg":
             selected.get(
                 "registration_number"
+            )
+            or selected.get(
+                "vehicle_reg"
             ),
-        "severity":
-            classification.get(
-                "severity"
-            ),
-        "category":
-            classification.get(
-                "category"
-            ),
-        "status":
-            "OPEN",
-        "rule_ids":
-            state.get(
+
+        "created_at":
+            utc_now(),
+
+        "citations": [
+            {
+                "rule_id":
+                    rule_id
+            }
+            for rule_id
+            in state.get(
                 "checked_rule_ids",
                 [],
-            ),
+            )
+        ],
     }
 
-    append_jsonl(
+    # ---------------------------------------------------------
+    # Idempotent output
+    # ---------------------------------------------------------
+
+    appended = _append_unique_jsonl(
         OUTPUT_DIR
         / "work_orders.jsonl",
         work_order,
+        "ticket_id",
     )
+
+    # ---------------------------------------------------------
+    # Ledger
+    # ---------------------------------------------------------
 
     upsert_pipeline_state(
         ticket_id=ticket_id,
@@ -783,7 +1151,11 @@ def work_order_node(
     _audit(
         state,
         "work_order_node",
-        "created",
+        (
+            "created"
+            if appended
+            else "existing_output_reused"
+        ),
         work_order,
         rule_ids=state.get(
             "checked_rule_ids",
@@ -798,7 +1170,6 @@ def work_order_node(
 # DRAFT NOTIFICATION
 # ============================================================
 
-
 def draft_notification_node(
     state: PipelineState,
 ) -> PipelineState:
@@ -807,7 +1178,13 @@ def draft_notification_node(
         "draft_notification"
     )
 
-    ticket_id = state["ticket_id"]
+    ticket_id = state[
+        "ticket_id"
+    ]
+
+    # ---------------------------------------------------------
+    # Idempotency
+    # ---------------------------------------------------------
 
     existing = get_pipeline_state(
         ticket_id
@@ -819,7 +1196,9 @@ def draft_notification_node(
     ):
 
         state["notification_id"] = (
-            existing["notification_id"]
+            existing[
+                "notification_id"
+            ]
         )
 
         _audit(
@@ -836,48 +1215,110 @@ def draft_notification_node(
 
         return state
 
-    ticket = state["ticket"]
+    ticket = state[
+        "ticket"
+    ]
 
     client = (
-        ticket.get("client")
+        _ticket_client(
+            ticket
+        )
         or "the client"
     )
 
     work_order = (
-        state.get("work_order")
+        state.get(
+            "work_order"
+        )
         or {}
     )
 
+    selected_vehicle = (
+        state.get(
+            "selected_vehicle"
+        )
+        or {}
+    )
+
+    classification = (
+        state.get(
+            "classification"
+        )
+        or {}
+    )
+
+    citations = [
+        {
+            "rule_id":
+                rule_id
+        }
+        for rule_id
+        in state.get(
+            "checked_rule_ids",
+            [],
+        )
+    ]
+
+    # ---------------------------------------------------------
+    # Draft prompt
+    # ---------------------------------------------------------
+
     prompt = f"""
 Draft a concise professional logistics
-notification to {client}.
+message to {client}.
 
-This is a DRAFT only.
+This is a DRAFT awaiting human approval.
 
-Do not claim that the message was sent.
+Never claim that the message was sent.
+
+Do not include personal data such as:
+
+- phone numbers
+- Aadhaar numbers
+- driving licence numbers
+- private contact information
+
+Use only operational information relevant
+to the client.
 
 Ticket:
-{json.dumps(ticket, default=str)}
+
+{json.dumps(
+    ticket,
+    ensure_ascii=False,
+    default=str,
+)}
 
 Work order:
-{json.dumps(work_order, default=str)}
+
+{json.dumps(
+    work_order,
+    ensure_ascii=False,
+    default=str,
+)}
 
 Selected vehicle:
+
 {json.dumps(
-    state.get("selected_vehicle"),
-    default=str
+    selected_vehicle,
+    ensure_ascii=False,
+    default=str,
 )}
 
 Classification:
+
 {json.dumps(
-    state.get("classification"),
-    default=str
+    classification,
+    ensure_ascii=False,
+    default=str,
 )}
 
-Rules checked:
+Rules:
+
 {json.dumps(
-    state.get("checked_rule_ids", []),
-    default=str
+    citations,
+    ensure_ascii=False,
+    default=str,
 )}
 
 Write only the message body.
@@ -887,7 +1328,9 @@ Write only the message body.
 
         llm = _get_llm()
 
-        call_id = new_id("llm")
+        call_id = new_id(
+            "llm"
+        )
 
         response = llm.invoke(
             prompt
@@ -895,11 +1338,14 @@ Write only the message body.
 
         message = (
             response.content
-            if hasattr(response, "content")
+            if hasattr(
+                response,
+                "content",
+            )
             else str(response)
         )
 
-    except Exception:
+    except Exception as exc:
 
         call_id = None
 
@@ -913,48 +1359,81 @@ Write only the message body.
             "Meridian Operations"
         )
 
+        _audit(
+            state,
+            "draft_notification_node",
+            "llm_failed_fallback",
+            {
+                "error":
+                    str(exc),
+            },
+        )
+
+    # ---------------------------------------------------------
+    # Pending notification
+    # ---------------------------------------------------------
+
     notification_id = new_id(
         "COM"
     )
 
     notification = {
-        "notification_id":
+
+        "message_id":
             notification_id,
+
         "ticket_id":
-            state["ticket_id"],
-        "work_order_id":
-            state.get(
-                "work_order_id"
-            ),
-        "client":
+            ticket_id,
+
+        "recipient":
             client,
-        "message":
-            message,
+
+        "body":
+            message.strip(),
+
+        "context": {
+
+            "work_order_id":
+                state.get(
+                    "work_order_id"
+                ),
+
+            "vehicle_reg":
+                selected_vehicle.get(
+                    "registration_number"
+                ),
+
+            "classification":
+                classification,
+        },
+
+        "citations":
+            citations,
+
         "status":
             "PENDING_APPROVAL",
-        "citations": [
-            {
-                "rule_id":
-                    rule_id
-            }
-            for rule_id
-            in state.get(
-                "checked_rule_ids",
-                [],
-            )
-        ],
+
         "created_at":
             utc_now(),
     }
 
-    append_jsonl(
+    # ---------------------------------------------------------
+    # Idempotent pending output
+    # ---------------------------------------------------------
+
+    appended = _append_unique_jsonl(
         OUTPUT_DIR
         / "comms_pending.jsonl",
         notification,
+        "ticket_id",
     )
 
+    # ---------------------------------------------------------
+    # Ledger
+    # ---------------------------------------------------------
+
     upsert_pipeline_state(
-        ticket_id=state["ticket_id"],
+        ticket_id=ticket_id,
         content_hash=state[
             "content_hash"
         ],
@@ -976,10 +1455,17 @@ Write only the message body.
     _audit(
         state,
         "draft_notification_node",
-        "draft_created",
+        (
+            "draft_created"
+            if appended
+            else "existing_draft_reused"
+        ),
         {
             "notification_id":
-                notification_id
+                notification_id,
+
+            "recipient":
+                client,
         },
         rule_ids=state.get(
             "checked_rule_ids",
@@ -991,7 +1477,6 @@ Write only the message body.
     return state
 
 
-
 # ============================================================
 # QUARANTINE
 # ============================================================
@@ -1000,39 +1485,98 @@ def quarantine_node(
     state: PipelineState,
 ) -> PipelineState:
 
+    state["current_node"] = (
+        "quarantine"
+    )
+
     reason = state.get(
         "quarantine_reason",
         "unknown validation failure",
     )
 
+    ticket_id = state.get(
+        "ticket_id"
+    )
+
     record = {
+
         "ticket_id":
-            state.get("ticket_id"),
+            ticket_id,
+
         "reason":
             reason,
+
         "status":
             "QUARANTINED",
+
         "created_at":
             utc_now(),
     }
 
-    append_jsonl(
-        OUTPUT_DIR
-        / "quarantine.jsonl",
-        record,
-    )
+    # ---------------------------------------------------------
+    # Prevent duplicate quarantine records.
+    # ---------------------------------------------------------
 
-    upsert_pipeline_state(
-        ticket_id=state.get(
+    if ticket_id:
+
+        appended = _append_unique_jsonl(
+            OUTPUT_DIR
+            / "quarantine.jsonl",
+            record,
             "ticket_id",
-            "unknown",
-        ),
-        content_hash=state.get(
-            "content_hash",
-            "",
-        ),
-        status="quarantine",
-    )
+        )
+
+    else:
+
+        record["content_hash"] = (
+            state.get(
+                "content_hash"
+            )
+        )
+
+        existing = read_jsonl(
+            OUTPUT_DIR
+            / "quarantine.jsonl"
+        )
+
+        duplicate = any(
+            item.get(
+                "content_hash"
+            )
+            == record[
+                "content_hash"
+            ]
+            for item in existing
+        )
+
+        if duplicate:
+
+            appended = False
+
+        else:
+
+            append_jsonl(
+                OUTPUT_DIR
+                / "quarantine.jsonl",
+                record,
+            )
+
+            appended = True
+
+    # ---------------------------------------------------------
+    # Ledger
+    # ---------------------------------------------------------
+
+    if ticket_id:
+
+        upsert_pipeline_state(
+            ticket_id=ticket_id,
+            content_hash=state.get(
+                "content_hash",
+                "",
+            ),
+            status="quarantine",
+        )
 
     state["status"] = (
         "quarantine"
@@ -1041,33 +1585,52 @@ def quarantine_node(
     _audit(
         state,
         "quarantine_node",
-        "quarantined",
-        record,
+        (
+            "quarantined"
+            if appended
+            else "already_quarantined"
+        ),
+        {
+            "reason":
+                reason,
+        },
     )
 
     return state
 
 
 # ============================================================
-# AUDIT NODE
+# AUDIT
 # ============================================================
 
 def audit_node(
     state: PipelineState,
 ) -> PipelineState:
 
-    state["current_node"] = "audit"
+    # ---------------------------------------------------------
+    # Preserve the node that ran immediately before audit.
+    # ---------------------------------------------------------
 
-    # Individual nodes already write detailed audit
-    # records. This node records the graph transition.
+    previous_node = state.get(
+        "current_node"
+    )
+
+    state["last_node"] = (
+        previous_node
+    )
 
     _audit(
         state,
         "audit_node",
         "pipeline_transition",
         {
+            "from_node":
+                previous_node,
+
             "status":
-                state.get("status"),
+                state.get(
+                    "status"
+                ),
         },
         rule_ids=state.get(
             "checked_rule_ids",
@@ -1078,4 +1641,11 @@ def audit_node(
         ),
     )
 
+    # IMPORTANT:
+    # Do not set current_node = "audit".
+    #
+    # graph.py uses last_node to determine
+    # the next transition.
+
     return state
+

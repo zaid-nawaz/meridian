@@ -4,12 +4,12 @@ from typing import Any, TypedDict
 
 
 class PipelineState(TypedDict, total=False):
+
     # ---------------------------------------------------------
     # Input
     # ---------------------------------------------------------
 
     ticket: dict[str, Any]
-
     ticket_id: str
     content_hash: str
 
@@ -20,7 +20,11 @@ class PipelineState(TypedDict, total=False):
     status: str
     quarantine_reason: str
 
+    # Node currently executing
     current_node: str
+
+    # Node that executed immediately before audit
+    last_node: str
 
     # ---------------------------------------------------------
     # Enrichment
