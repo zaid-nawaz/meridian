@@ -6,7 +6,7 @@ PRAGMA foreign_keys = ON;
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS vehicles (
-    vehicle_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vehicle_id TEXT PRIMARY KEY,
 
     registration_number TEXT NOT NULL UNIQUE,
     normalized_registration TEXT NOT NULL UNIQUE,
@@ -14,9 +14,13 @@ CREATE TABLE IF NOT EXISTS vehicles (
     model TEXT,
     model_year INTEGER,
 
-    home_hub TEXT,
+    bs_stage TEXT,
+    engine_heater TEXT,
 
-    status TEXT DEFAULT 'active',
+    home_hub TEXT,
+    capacity_tonnes REAL,
+
+    status TEXT,
 
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -27,7 +31,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS drivers (
-    driver_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    driver_id TEXT PRIMARY KEY,
 
     driver_name TEXT NOT NULL,
 
@@ -35,6 +39,7 @@ CREATE TABLE IF NOT EXISTS drivers (
     dl_number TEXT,
     aadhaar TEXT,
 
+    joining_date TEXT,
     tenure_months REAL,
 
     home_hub TEXT,
@@ -66,33 +71,46 @@ CREATE TABLE IF NOT EXISTS clients (
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS trips (
-    trip_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id TEXT PRIMARY KEY,
 
-    vehicle_id INTEGER,
+    created_at TEXT,
+
+    route_type TEXT,
+
+    origin_center TEXT,
+    origin_name TEXT,
+
+    dest_center TEXT,
+    dest_name TEXT,
+
+    dispatch_time TEXT,
+    delivery_time TEXT,
+
+    osrm_distance_km REAL,
+    osrm_time_min REAL,
+    actual_time_min REAL,
 
     vehicle_reg TEXT NOT NULL,
     normalized_vehicle_reg TEXT NOT NULL,
 
-    client_id INTEGER,
+    vehicle_id TEXT,
+
+    driver_id TEXT,
 
     client TEXT,
     normalized_client TEXT,
 
-    origin_hub TEXT,
-    destination TEXT,
-
-    departure_time TEXT,
-    arrival_time TEXT,
-
     status TEXT,
 
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    billed_amount REAL,
+
+    created_at_db TEXT DEFAULT CURRENT_TIMESTAMP,
 
     FOREIGN KEY (vehicle_id)
         REFERENCES vehicles(vehicle_id),
 
-    FOREIGN KEY (client_id)
-        REFERENCES clients(client_id)
+    FOREIGN KEY (driver_id)
+        REFERENCES drivers(driver_id)
 );
 
 
@@ -103,14 +121,16 @@ CREATE TABLE IF NOT EXISTS trips (
 CREATE TABLE IF NOT EXISTS maintenance_events (
     maintenance_id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-    vehicle_id INTEGER,
+    service_date TEXT,
 
     vehicle_reg TEXT NOT NULL,
     normalized_vehicle_reg TEXT NOT NULL,
 
-    service_date TEXT,
+    vehicle_id TEXT,
 
-    maintenance_type TEXT,
+    odometer_km REAL,
+
+    mechanic TEXT,
 
     note TEXT,
 
@@ -182,22 +202,17 @@ CREATE TABLE IF NOT EXISTS pipeline_state (
 CREATE INDEX IF NOT EXISTS idx_vehicles_normalized_registration
 ON vehicles(normalized_registration);
 
-
 CREATE INDEX IF NOT EXISTS idx_drivers_name
 ON drivers(driver_name);
-
 
 CREATE INDEX IF NOT EXISTS idx_trips_vehicle
 ON trips(normalized_vehicle_reg);
 
-
 CREATE INDEX IF NOT EXISTS idx_trips_client
 ON trips(normalized_client);
 
-
 CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle
 ON maintenance_events(normalized_vehicle_reg);
-
 
 CREATE INDEX IF NOT EXISTS idx_aliases_lookup
 ON entity_aliases(entity_type, normalized_alias);
